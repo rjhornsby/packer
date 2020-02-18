@@ -2,6 +2,7 @@ package hcl2template
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -212,7 +213,7 @@ func (variables Variables) collectVariableValues(env []string, files []*hcl.File
 		if !strings.HasPrefix(raw, VarEnvPrefix) {
 			continue
 		}
-		raw = raw[len(VarEnvPrefix):] // trim the prefix
+		raw = strings.TrimPrefix(raw, VarEnvPrefix) // trim the prefix
 
 		eq := strings.Index(raw, "=")
 		if eq == -1 {
@@ -223,18 +224,25 @@ func (variables Variables) collectVariableValues(env []string, files []*hcl.File
 		name := raw[:eq]
 		value := raw[eq+1:]
 
+		// Check if this variable was parsed from an hcl file.
 		variable, found := variables[name]
 		if !found {
 			// this variable was not defined in the hcl files, let's skip it !
 			continue
 		}
 
-		fakeFilename := fmt.Sprintf("<value for var.%s from env>", name)
+		fakeFilename := fmt.Sprintf("<value for var.%s from arguments>", name)
 		expr, moreDiags := hclsyntax.ParseExpression([]byte(value), fakeFilename, hcl.Pos{Line: 1, Column: 1})
+
+		if moreDiags.HasErrors() && !exprIsNativeQuotedString(expr) {
+			value = strconv.Quote(value)
+			expr, moreDiags = hclsyntax.ParseExpression([]byte(value), fakeFilename, hcl.Pos{Line: 1, Column: 1})
+		}
 		diags = append(diags, moreDiags...)
 		if moreDiags.HasErrors() {
 			continue
 		}
+
 		val, valDiags := expr.Value(nil)
 		diags = append(diags, valDiags...)
 
@@ -345,6 +353,12 @@ func (variables Variables) collectVariableValues(env []string, files []*hcl.File
 
 		fakeFilename := fmt.Sprintf("<value for var.%s from arguments>", name)
 		expr, moreDiags := hclsyntax.ParseExpression([]byte(value), fakeFilename, hcl.Pos{Line: 1, Column: 1})
+
+		if moreDiags.HasErrors() && !exprIsNativeQuotedString(expr) {
+			value = strconv.Quote(value)
+			expr, moreDiags = hclsyntax.ParseExpression([]byte(value), fakeFilename, hcl.Pos{Line: 1, Column: 1})
+		}
+
 		diags = append(diags, moreDiags...)
 		if moreDiags.HasErrors() {
 			continue
@@ -370,4 +384,16 @@ func (variables Variables) collectVariableValues(env []string, files []*hcl.File
 	}
 
 	return diags
+}
+
+// exprIsNativeQuotedString determines whether the given expression looks like
+// it's a quoted string in the HCL native syntax.
+//
+// This should be used sparingly only for situations where our legacy HCL
+// decoding would've expected a keyword or reference in quotes but our new
+// decoding expects the keyword or reference to be provided directly as
+// an identifier-based expression.
+func exprIsNativeQuotedString(expr hcl.Expression) bool {
+	_, ok := expr.(*hclsyntax.TemplateExpr)
+	return ok
 }
